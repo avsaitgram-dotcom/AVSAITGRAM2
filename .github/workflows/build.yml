@@ -1,0 +1,310 @@
+name: Build
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Install pillow
+        run: python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet pillow
+      - name: AVSAITGRAM patches
+        run: |
+          python3 - <<'EOF'
+          import glob, os, re, sys
+
+          applied = []
+          skipped = []
+
+          def read(path):
+              with open(path, encoding='utf-8') as f:
+                  return f.read()
+
+          def write(path, text):
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(text)
+
+          JAVA = 'TMessagesProj/src/main/java/'
+
+          # 1. API keys (required)
+          p = JAVA + 'org/telegram/messenger/BuildVars.java'
+          s = read(p)
+          s, n1 = re.subn(r'(APP_ID\s*=\s*)\d+(\s*;)', r'\g<1>${{ secrets.APP_ID }}\g<2>', s)
+          s, n2 = re.subn(r'(APP_HASH\s*=\s*")[0-9a-fA-F]+(")', r'\g<1>${{ secrets.APP_HASH }}\g<2>', s)
+          if n1 != 1 or n2 != 1:
+              sys.exit('PATCH FAILED: BuildVars ' + str((n1, n2)))
+          write(p, s)
+          applied.append('api keys')
+
+          # 2. App name
+          p = 'TMessagesProj/src/main/res/values/strings.xml'
+          try:
+              s = read(p)
+              s2 = s.replace('<string name="AppName">Telegram</string>', '<string name="AppName">AVSAITGRAM</string>')
+              if s2 == s:
+                  raise RuntimeError('AppName string not found')
+              write(p, s2)
+              applied.append('app name')
+          except Exception as e:
+              skipped.append('app name: ' + str(e))
+
+          # 3. Own classes
+          os.makedirs(JAVA + 'com/avsait', exist_ok=True)
+          write(JAVA + 'com/avsait/AvsaitConfig.java', '''package com.avsait;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.telegram.messenger.ApplicationLoader;
+
+          import java.util.Arrays;
+          import java.util.HashSet;
+
+          public class AvsaitConfig {
+              private static final HashSet<String> BLOCKED = new HashSet<>(Arrays.asList(
+                      "TL_account_updateStatus", "updateStatus",
+                      "TL_messages_setTyping", "setTyping",
+                      "TL_messages_readHistory", "TL_channels_readHistory", "readHistory",
+                      "TL_messages_readMessageContents", "TL_channels_readMessageContents", "readMessageContents",
+                      "TL_stories_readStories", "readStories"
+              ));
+
+              private static volatile Boolean ghost;
+              private static volatile Boolean premium;
+
+              private static SharedPreferences prefs(Context context) {
+                  if (context == null) {
+                      context = ApplicationLoader.applicationContext;
+                  }
+                  if (context == null) {
+                      return null;
+                  }
+                  return context.getSharedPreferences("avsaitconfig", Context.MODE_PRIVATE);
+              }
+
+              public static boolean ghost() {
+                  Boolean v = ghost;
+                  if (v == null) {
+                      SharedPreferences p = prefs(null);
+                      if (p == null) {
+                          return true;
+                      }
+                      v = p.getBoolean("ghost", true);
+                      ghost = v;
+                  }
+                  return v;
+              }
+
+              public static void setGhost(Context context, boolean value) {
+                  ghost = value;
+                  SharedPreferences p = prefs(context);
+                  if (p != null) {
+                      p.edit().putBoolean("ghost", value).apply();
+                  }
+              }
+
+              public static boolean premium() {
+                  Boolean v = premium;
+                  if (v == null) {
+                      SharedPreferences p = prefs(null);
+                      if (p == null) {
+                          return true;
+                      }
+                      v = p.getBoolean("premium", true);
+                      premium = v;
+                  }
+                  return v;
+              }
+
+              public static void setPremium(Context context, boolean value) {
+                  premium = value;
+                  SharedPreferences p = prefs(context);
+                  if (p != null) {
+                      p.edit().putBoolean("premium", value).apply();
+                  }
+              }
+
+              public static boolean shouldBlock(Object object) {
+                  if (object == null || !ghost()) {
+                      return false;
+                  }
+                  return BLOCKED.contains(object.getClass().getSimpleName());
+              }
+          }
+          ''')
+          write(JAVA + 'com/avsait/AvsaitSettingsActivity.java', '''package com.avsait;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Switch;
+          import android.widget.TextView;
+
+          public class AvsaitSettingsActivity extends Activity {
+
+              private int dp(int value) {
+                  return (int) (value * getResources().getDisplayMetrics().density);
+              }
+
+              private void header(LinearLayout root, String text) {
+                  TextView view = new TextView(this);
+                  view.setText(text);
+                  view.setTextSize(14);
+                  view.setPadding(0, dp(20), 0, dp(6));
+                  root.addView(view);
+              }
+
+              private void note(LinearLayout root, String text) {
+                  TextView view = new TextView(this);
+                  view.setText(text);
+                  view.setTextSize(13);
+                  view.setAlpha(0.7f);
+                  view.setPadding(0, dp(4), 0, dp(8));
+                  root.addView(view);
+              }
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setTitle("AVSAITGRAM");
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(16), dp(8), dp(16), dp(24));
+                  scroll.addView(root);
+
+                  header(root, "Конфиденциальность");
+                  Switch ghost = new Switch(this);
+                  ghost.setText("Режим призрака");
+                  ghost.setTextSize(17);
+                  ghost.setPadding(0, dp(8), 0, dp(8));
+                  ghost.setChecked(AvsaitConfig.ghost());
+                  ghost.setOnCheckedChangeListener((button, checked) -> AvsaitConfig.setGhost(this, checked));
+                  root.addView(ghost);
+                  note(root, "Не отправлять «прочитано», «печатает» и «в сети».");
+
+                  header(root, "Premium");
+                  Switch premium = new Switch(this);
+                  premium.setText("Локальный Premium");
+                  premium.setTextSize(17);
+                  premium.setPadding(0, dp(8), 0, dp(8));
+                  premium.setChecked(AvsaitConfig.premium());
+                  premium.setOnCheckedChangeListener((button, checked) -> AvsaitConfig.setPremium(this, checked));
+                  root.addView(premium);
+                  note(root, "Меняет только интерфейс этого приложения, серверные функции Premium не открывает. После переключения перезапусти приложение.");
+
+                  header(root, "О программе");
+                  note(root, "AVSAITGRAM. Неофициальный клиент на открытом коде Telegram для Android.");
+
+                  setContentView(scroll);
+              }
+          }
+          ''')
+          applied.append('own classes')
+
+          # 4. Manifest entry for settings
+          p = 'TMessagesProj/src/main/AndroidManifest.xml'
+          try:
+              s = read(p)
+              if s.count('</application>') != 1:
+                  raise RuntimeError('</application> not unique')
+              entry = '''    <activity
+                  android:name="com.avsait.AvsaitSettingsActivity"
+                  android:label="AVSAIT настройки"
+                  android:exported="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:taskAffinity="com.avsait.settings"
+                  android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+                  <intent-filter>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent-filter>
+              </activity>
+          </application>'''
+              write(p, s.replace('</application>', entry))
+              applied.append('settings entry in manifest')
+          except Exception as e:
+              skipped.append('settings entry: ' + str(e))
+
+          # 5. Ghost mode hook in ConnectionsManager
+          p = JAVA + 'org/telegram/tgnet/ConnectionsManager.java'
+          try:
+              s = read(p)
+              pattern = re.compile(r'(public\s+int\s+sendRequest\(\s*TLObject\s+object\s*,[^{;]*?\)\s*\{)')
+              s, n = pattern.subn(lambda m: m.group(1) + '\n        if (com.avsait.AvsaitConfig.shouldBlock(object)) {\n            return 0;\n        }', s)
+              if n == 0:
+                  raise RuntimeError('sendRequest not found')
+              write(p, s)
+              applied.append('ghost mode (%d hooks)' % n)
+          except Exception as e:
+              skipped.append('ghost mode: ' + str(e))
+
+          # 6. Local premium
+          p = JAVA + 'org/telegram/messenger/UserConfig.java'
+          try:
+              s = read(p)
+              pattern = re.compile(r'(public\s+boolean\s+isPremium\(\)\s*\{)')
+              s, n = pattern.subn(lambda m: m.group(1) + '\n        if (com.avsait.AvsaitConfig.premium() && isClientActivated()) {\n            return true;\n        }', s, count=1)
+              if n == 0:
+                  raise RuntimeError('isPremium not found')
+              write(p, s)
+              applied.append('local premium')
+          except Exception as e:
+              skipped.append('local premium: ' + str(e))
+
+          # 7. Icon
+          try:
+              from PIL import Image
+              files = [f for e in ('png', 'jpg', 'jpeg') for f in glob.glob('*.' + e)]
+              if not files:
+                  raise RuntimeError('no logo image in repo root')
+              logo = Image.open(files[0]).convert('RGB')
+              base = 'TMessagesProj/src/main/res/'
+              os.makedirs(base + 'drawable-nodpi', exist_ok=True)
+              os.makedirs(base + 'drawable', exist_ok=True)
+              logo.resize((432, 432), Image.LANCZOS).save(base + 'drawable-nodpi/avsait_icon.png')
+              write(base + 'drawable/avsait_foreground.xml', '<?xml version="1.0" encoding="utf-8"?>\n<inset xmlns:android="http://schemas.android.com/apk/res/android" android:drawable="@drawable/avsait_icon" android:inset="17%"/>\n')
+              adaptive = '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@android:color/black"/>\n    <foreground android:drawable="@drawable/avsait_foreground"/>\n</adaptive-icon>\n'
+              png_count = 0
+              xml_count = 0
+              for root in glob.glob('TMessagesProj*/src/main/res'):
+                  for path in glob.glob(root + '/mipmap-*/ic_launcher*.png') + glob.glob(root + '/drawable*/ic_launcher*.png'):
+                      name = os.path.basename(path).lower()
+                      if any(x in name for x in ('foreground', 'background', 'monochrome')):
+                          continue
+                      w, h = Image.open(path).size
+                      logo.resize((w, h), Image.LANCZOS).save(path)
+                      png_count += 1
+                  for path in glob.glob(root + '/mipmap-anydpi*/ic_launcher*.xml') + glob.glob(root + '/drawable*/ic_launcher*.xml'):
+                      if '<adaptive-icon' in read(path):
+                          write(path, adaptive)
+                          xml_count += 1
+              if png_count + xml_count == 0:
+                  raise RuntimeError('no launcher icon files found')
+              applied.append('icon (%d png, %d adaptive)' % (png_count, xml_count))
+          except Exception as e:
+              skipped.append('icon: ' + str(e))
+
+          print('=== APPLIED ===')
+          for x in applied:
+              print('  OK  ', x)
+          print('=== SKIPPED ===')
+          for x in skipped:
+              print('  SKIP', x)
+          EOF
+      - name: Accept licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - name: Build
+        run: |
+          chmod +x gradlew
+          ./gradlew :TMessagesProj_App:assembleAfatRelease --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AVSAITGRAM2-apk
+          path: TMessagesProj_App/build/outputs/apk/**/*.apk
