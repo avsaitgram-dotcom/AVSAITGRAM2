@@ -15,7 +15,7 @@ jobs:
         run: python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet pillow
       - name: AVSAITGRAM patches
         run: |
-          python3 - <<'EOF'
+          PYTHONUTF8=1 python3 - <<'EOF'
           import glob, os, re, sys
 
           applied = []
@@ -62,20 +62,18 @@ jobs:
 
           import org.telegram.messenger.ApplicationLoader;
 
-          import java.util.Arrays;
-          import java.util.HashSet;
+          import java.util.concurrent.ConcurrentHashMap;
 
           public class AvsaitConfig {
-              private static final HashSet<String> BLOCKED = new HashSet<>(Arrays.asList(
-                      "TL_account_updateStatus", "updateStatus",
-                      "TL_messages_setTyping", "setTyping",
-                      "TL_messages_readHistory", "TL_channels_readHistory", "readHistory",
-                      "TL_messages_readMessageContents", "TL_channels_readMessageContents", "readMessageContents",
-                      "TL_stories_readStories", "readStories"
-              ));
+              public static final String HIDE_ONLINE = "hide_online";
+              public static final String HIDE_TYPING = "hide_typing";
+              public static final String HIDE_READ = "hide_read";
+              public static final String HIDE_STORIES = "hide_stories";
+              public static final String NO_ADS = "no_ads";
+              public static final String PREMIUM = "premium";
 
-              private static volatile Boolean ghost;
-              private static volatile Boolean premium;
+              private static final ConcurrentHashMap<String, Boolean> values = new ConcurrentHashMap<>();
+              private static final ConcurrentHashMap<Class<?>, String> kinds = new ConcurrentHashMap<>();
 
               private static SharedPreferences prefs(Context context) {
                   if (context == null) {
@@ -87,120 +85,184 @@ jobs:
                   return context.getSharedPreferences("avsaitconfig", Context.MODE_PRIVATE);
               }
 
-              public static boolean ghost() {
-                  Boolean v = ghost;
+              public static boolean get(String key) {
+                  Boolean v = values.get(key);
                   if (v == null) {
                       SharedPreferences p = prefs(null);
                       if (p == null) {
                           return true;
                       }
-                      v = p.getBoolean("ghost", true);
-                      ghost = v;
+                      v = p.getBoolean(key, true);
+                      values.put(key, v);
                   }
                   return v;
               }
 
-              public static void setGhost(Context context, boolean value) {
-                  ghost = value;
+              public static void set(Context context, String key, boolean value) {
+                  values.put(key, value);
                   SharedPreferences p = prefs(context);
                   if (p != null) {
-                      p.edit().putBoolean("ghost", value).apply();
+                      p.edit().putBoolean(key, value).apply();
                   }
               }
 
               public static boolean premium() {
-                  Boolean v = premium;
-                  if (v == null) {
-                      SharedPreferences p = prefs(null);
-                      if (p == null) {
-                          return true;
-                      }
-                      v = p.getBoolean("premium", true);
-                      premium = v;
-                  }
-                  return v;
+                  return get(PREMIUM);
               }
 
-              public static void setPremium(Context context, boolean value) {
-                  premium = value;
-                  SharedPreferences p = prefs(context);
-                  if (p != null) {
-                      p.edit().putBoolean("premium", value).apply();
+              private static String classify(String name) {
+                  switch (name) {
+                      case "TL_account_updateStatus":
+                      case "updateStatus":
+                          return HIDE_ONLINE;
+                      case "TL_messages_setTyping":
+                      case "setTyping":
+                          return HIDE_TYPING;
+                      case "TL_messages_readHistory":
+                      case "TL_channels_readHistory":
+                      case "readHistory":
+                      case "TL_messages_readMessageContents":
+                      case "TL_channels_readMessageContents":
+                      case "readMessageContents":
+                          return HIDE_READ;
+                      case "TL_stories_readStories":
+                      case "readStories":
+                          return HIDE_STORIES;
+                      case "TL_messages_getSponsoredMessages":
+                      case "TL_channels_getSponsoredMessages":
+                      case "getSponsoredMessages":
+                          return NO_ADS;
+                      default:
+                          return "";
                   }
               }
 
               public static boolean shouldBlock(Object object) {
-                  if (object == null || !ghost()) {
+                  if (object == null) {
                       return false;
                   }
-                  return BLOCKED.contains(object.getClass().getSimpleName());
+                  Class<?> cls = object.getClass();
+                  String key = kinds.get(cls);
+                  if (key == null) {
+                      key = classify(cls.getSimpleName());
+                      kinds.put(cls, key);
+                  }
+                  return !key.isEmpty() && get(key);
               }
           }
           ''')
           write(JAVA + 'com/avsait/AvsaitSettingsActivity.java', '''package com.avsait;
 
           import android.app.Activity;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
           import android.os.Bundle;
+          import android.view.ViewGroup;
+          import android.widget.Button;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.Switch;
           import android.widget.TextView;
 
           public class AvsaitSettingsActivity extends Activity {
+              private static final int BG = 0xFF0E0B16;
+              private static final int CARD = 0xFF1B1530;
+              private static final int ACCENT = 0xFFA66BFF;
+              private static final int TEXT = 0xFFFFFFFF;
+              private static final int SUBTEXT = 0xFFA79EBB;
 
               private int dp(int value) {
                   return (int) (value * getResources().getDisplayMetrics().density);
               }
 
-              private void header(LinearLayout root, String text) {
+              private TextView label(String value, int size, int color, boolean bold) {
                   TextView view = new TextView(this);
-                  view.setText(text);
-                  view.setTextSize(14);
-                  view.setPadding(0, dp(20), 0, dp(6));
-                  root.addView(view);
+                  view.setText(value);
+                  view.setTextSize(size);
+                  view.setTextColor(color);
+                  if (bold) {
+                      view.setTypeface(view.getTypeface(), Typeface.BOLD);
+                  }
+                  return view;
               }
 
-              private void note(LinearLayout root, String text) {
-                  TextView view = new TextView(this);
-                  view.setText(text);
-                  view.setTextSize(13);
-                  view.setAlpha(0.7f);
-                  view.setPadding(0, dp(4), 0, dp(8));
-                  root.addView(view);
+              private LinearLayout card(LinearLayout root, String title) {
+                  TextView head = label(title, 12, ACCENT, true);
+                  head.setPadding(dp(8), dp(20), 0, dp(8));
+                  root.addView(head);
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable shape = new GradientDrawable();
+                  shape.setColor(CARD);
+                  shape.setCornerRadius(dp(16));
+                  box.setBackground(shape);
+                  box.setPadding(dp(16), dp(8), dp(16), dp(8));
+                  root.addView(box, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  return box;
+              }
+
+              private void row(LinearLayout box, String title, String hint, String key) {
+                  LinearLayout item = new LinearLayout(this);
+                  item.setOrientation(LinearLayout.VERTICAL);
+                  item.setPadding(0, dp(10), 0, dp(10));
+                  Switch toggle = new Switch(this);
+                  toggle.setText(title);
+                  toggle.setTextSize(16);
+                  toggle.setTextColor(TEXT);
+                  toggle.setChecked(AvsaitConfig.get(key));
+                  toggle.setOnCheckedChangeListener((button, checked) -> AvsaitConfig.set(AvsaitSettingsActivity.this, key, checked));
+                  item.addView(toggle);
+                  TextView note = label(hint, 12, SUBTEXT, false);
+                  note.setPadding(0, dp(4), dp(56), 0);
+                  item.addView(note);
+                  box.addView(item);
               }
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   setTitle("AVSAITGRAM");
+                  getWindow().setStatusBarColor(BG);
+                  getWindow().setNavigationBarColor(BG);
+
                   ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(BG);
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(16), dp(8), dp(16), dp(24));
+                  root.setPadding(dp(16), dp(32), dp(16), dp(32));
                   scroll.addView(root);
 
-                  header(root, "Конфиденциальность");
-                  Switch ghost = new Switch(this);
-                  ghost.setText("Режим призрака");
-                  ghost.setTextSize(17);
-                  ghost.setPadding(0, dp(8), 0, dp(8));
-                  ghost.setChecked(AvsaitConfig.ghost());
-                  ghost.setOnCheckedChangeListener((button, checked) -> AvsaitConfig.setGhost(this, checked));
-                  root.addView(ghost);
-                  note(root, "Не отправлять «прочитано», «печатает» и «в сети».");
+                  root.addView(label("AVSAITGRAM", 28, TEXT, true));
+                  TextView subtitle = label("Настройки клиента", 14, SUBTEXT, false);
+                  subtitle.setPadding(0, dp(2), 0, 0);
+                  root.addView(subtitle);
 
-                  header(root, "Premium");
-                  Switch premium = new Switch(this);
-                  premium.setText("Локальный Premium");
-                  premium.setTextSize(17);
-                  premium.setPadding(0, dp(8), 0, dp(8));
-                  premium.setChecked(AvsaitConfig.premium());
-                  premium.setOnCheckedChangeListener((button, checked) -> AvsaitConfig.setPremium(this, checked));
-                  root.addView(premium);
-                  note(root, "Меняет только интерфейс этого приложения, серверные функции Premium не открывает. После переключения перезапусти приложение.");
+                  LinearLayout ghost = card(root, "РЕЖИМ ПРИЗРАКА");
+                  row(ghost, "Скрыть «в сети»", "Другие не видят, что вы онлайн.", AvsaitConfig.HIDE_ONLINE);
+                  row(ghost, "Скрыть «печатает»", "Собеседник не видит, что вы набираете сообщение.", AvsaitConfig.HIDE_TYPING);
+                  row(ghost, "Не отмечать прочитанным", "Собеседник не видит, что вы прочитали сообщение.", AvsaitConfig.HIDE_READ);
+                  row(ghost, "Не отмечать просмотр историй", "Автор не видит, что вы смотрели историю.", AvsaitConfig.HIDE_STORIES);
 
-                  header(root, "О программе");
-                  note(root, "AVSAITGRAM. Неофициальный клиент на открытом коде Telegram для Android.");
+                  LinearLayout ads = card(root, "РЕКЛАМА");
+                  row(ads, "Скрыть рекламные сообщения", "Пытается убрать спонсорские сообщения в каналах.", AvsaitConfig.NO_ADS);
+
+                  LinearLayout premium = card(root, "PREMIUM");
+                  row(premium, "Локальный Premium", "Меняет только интерфейс этого приложения. Серверные функции Premium не открывает. После переключения закройте и откройте приложение.", AvsaitConfig.PREMIUM);
+
+                  LinearLayout about = card(root, "О ПРОГРАММЕ");
+                  TextView info = label("AVSAITGRAM. Неофициальный клиент на открытом коде Telegram для Android. Подарки и Stars работают за реальный баланс аккаунта.", 13, SUBTEXT, false);
+                  info.setPadding(0, dp(10), 0, dp(10));
+                  about.addView(info);
+
+                  Button restart = new Button(this);
+                  restart.setText("Закрыть приложение");
+                  restart.setOnClickListener(view -> {
+                      finishAffinity();
+                      android.os.Process.killProcess(android.os.Process.myPid());
+                  });
+                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  params.topMargin = dp(24);
+                  root.addView(restart, params);
 
                   setContentView(scroll);
               }
@@ -220,7 +282,7 @@ jobs:
                   android:exported="true"
                   android:icon="@mipmap/ic_launcher"
                   android:taskAffinity="com.avsait.settings"
-                  android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+                  android:theme="@android:style/Theme.Material.NoActionBar">
                   <intent-filter>
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
@@ -232,7 +294,7 @@ jobs:
           except Exception as e:
               skipped.append('settings entry: ' + str(e))
 
-          # 5. Ghost mode hook in ConnectionsManager
+          # 5. Ghost mode and ads hook in ConnectionsManager
           p = JAVA + 'org/telegram/tgnet/ConnectionsManager.java'
           try:
               s = read(p)
@@ -241,9 +303,9 @@ jobs:
               if n == 0:
                   raise RuntimeError('sendRequest not found')
               write(p, s)
-              applied.append('ghost mode (%d hooks)' % n)
+              applied.append('request hook (%d)' % n)
           except Exception as e:
-              skipped.append('ghost mode: ' + str(e))
+              skipped.append('request hook: ' + str(e))
 
           # 6. Local premium
           p = JAVA + 'org/telegram/messenger/UserConfig.java'
